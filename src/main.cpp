@@ -11,17 +11,20 @@
 #include "esp_system.h"
 
 #define TINY_GSM_MODEM_SIM7600
-#define UART_PORT       UART_NUM_1
-#define TXD_PIN         17
-#define RXD_PIN         16
+#define UART_PORT_M       UART_NUM_1
 #define BUF_SIZE        512
 #define MAX_PHOTOS      4
 
 #include <HTTPClient.h>
 #include "TinyGsmClient.h"
+#include "board_master.hpp"
 
 static const char *TAG = "UART_RECEIVER";
 static int current_photo_index = 0;
+
+namespace {
+    uart::BoardMaster master;
+}
 
 void init_spiffs(void) {
     ESP_LOGI(TAG, "🗂️ Inicializando SPIFFS...");
@@ -87,16 +90,16 @@ void uart_receiver_task(void *arg) {
     uint8_t crc_rx;
 
     while (1) {
-        int read = uart_read_bytes(UART_PORT, &comm, 1, portMAX_DELAY);
+        int read = uart_read_bytes(UART_PORT_M, &comm, 1, portMAX_DELAY);
         if (read != 1) continue;
 
         uint8_t crc = comm;
 
-        if (uart_read_bytes(UART_PORT, &len_body, 1, pdMS_TO_TICKS(20)) == 1) {
+        if (uart_read_bytes(UART_PORT_M, &len_body, 1, pdMS_TO_TICKS(20)) == 1) {
             crc ^= len_body;
 
             if (len_body > 0) {
-                int body_len = uart_read_bytes(UART_PORT, body, len_body, portMAX_DELAY);
+                int body_len = uart_read_bytes(UART_PORT_M, body, len_body, portMAX_DELAY);
                 if (body_len != len_body) {
                     ESP_LOGE(TAG, "❌ Body incompleto");
                     continue;
@@ -110,7 +113,7 @@ void uart_receiver_task(void *arg) {
             len_body = 0;
         }
 
-        if (uart_read_bytes(UART_PORT, &crc_rx, 1, portMAX_DELAY) != 1) {
+        if (uart_read_bytes(UART_PORT_M, &crc_rx, 1, portMAX_DELAY) != 1) {
             ESP_LOGE(TAG, "❌ No se recibió CRC");
             continue;
         }
@@ -128,22 +131,7 @@ void uart_receiver_task(void *arg) {
 }
 
 void setup() {
-    init_spiffs();
-    list_photos();
-
-    const uart_config_t uart_config = {
-        .baud_rate = 115200,
-        .data_bits = UART_DATA_8_BITS,
-        .parity    = UART_PARITY_EVEN,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE
-    };
-
-    uart_driver_install(UART_PORT, BUF_SIZE * 2, 0, 0, NULL, 0);
-    uart_param_config(UART_PORT, &uart_config);
-    uart_set_pin(UART_PORT, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-
-    xTaskCreate(uart_receiver_task, "uart_rx_task", 4096, NULL, 10, NULL);
+    master.init();
 }
 
 void loop () {}
