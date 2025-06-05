@@ -55,6 +55,13 @@ constexpr static const gpio_num_t RX_PIN{GPIO_NUM_18};
  * @name Enums used for the BoardMaster
  */
 /**@{*/
+typedef enum {
+  WAITING_RES,
+  WAITING_LEN,
+  WAITING_BODY,
+  WAITING_CRC,
+  RESET_RX
+} rx_state_t;
 
 typedef enum {
   CONF,                                       // Configure RTC and Initialize Components
@@ -107,9 +114,10 @@ class BoardMaster {
    * 
    * @brief All the needed FreeRTOS tasks, members and functions are declared here.
    * @todo Turn tasks into static tasks
+   * @todo Make task handles private
    */
   /**@{*/
- private:
+ public:
   /**
    * @brief A handle for the UART talking task. Used to send commands in real time.
    */
@@ -159,8 +167,14 @@ class BoardMaster {
    */
   static inline StaticTimer_t response_timer_state;
   /**
+   * @brief A flag indicating wether the response timeout was reached
+   */
+ public:
+  static inline bool timeout_reached = false;
+  /**
    * @brief The rolling CRC
    */
+ private:
   inline static uint8_t crc;
   /**
    * @brief A buffer for the bytes to be sent
@@ -179,6 +193,10 @@ class BoardMaster {
    * @brief The amount of characters to be received into `response_buff`
    */
   inline static uint8_t response_len = 1;
+  /**
+   * @brief The current state of the receiver.
+   */
+  inline static rx_state_t rx_state;
   /**@} */
 
   /**
@@ -199,7 +217,7 @@ class BoardMaster {
   /**
    * @brief Build the CONF command sequence in the `command_buffer`
    */
-  void BoardMaster::build_conf();
+  void build_conf();
   /**@} */
 
 }; // end BoardMaster

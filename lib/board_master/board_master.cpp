@@ -7,6 +7,7 @@ static void timeout_handler(TimerHandle_t timer) {
   // Retrieve the pointer to the BoardMaster from the timer ID
   BoardMaster * master = ( BoardMaster * ) pvTimerGetTimerID( timer );
   /// TODO: reset corresponding variables
+  master->timeout_reached = true;
 };
 
 /* ============= Constructor, Destructor, init() and begin() ============= */
@@ -105,6 +106,7 @@ void BoardMaster::talk(void *p) {
   esp_err_t ret{ESP_OK}; // This is needed for the ESP_GOTO_ON_FALSE macro
   BoardMaster *master = reinterpret_cast<BoardMaster *>(p);
   command_t command;
+  
   while(true) {
     // Wait for this task to be notified
     command = (command_t)ulTaskNotifyTake( pdTRUE, portMAX_DELAY );
@@ -124,9 +126,124 @@ void BoardMaster::talk(void *p) {
         break;
       default:
         break;
-    } 
-  }
-}
+    } // end switch
+    // Send the command and start the response timer
+    master->send_command(command);
+    master->timeout_reached = true;
+    xTimerStart(master->response_timer, portMAX_DELAY);
+    // Notify the response_handling_task
+    xTaskNotify(master->response_handling_task, command, eSetValueWithOverwrite);
+  } // end while
+} // end talk
+
+void BoardMaster::handle_response(void *p) {
+  esp_err_t ret{ESP_OK}; // This is needed for the ESP_GOTO_ON_FALSE macro
+  command_t command;
+  BoardMaster *master = reinterpret_cast<BoardMaster *>(p);
+  unsigned char rx_buffer[512]; // A buffer for reception.
+  uint32_t rx_count = 0;        // A byte counter
+  uint32_t body_len = 0;        // The length of the received command
+  uint8_t  body_len_count = 0;  /// TODO: Receive more than one byte for the LEN portion
+  int bytes_received;
+  while(true) {
+    // Wait for this task to be notified
+    command = (command_t)ulTaskNotifyTake( pdTRUE, portMAX_DELAY );
+    while (!timeout_reached) {
+      bytes_received = uart_read_bytes(UART_PORT, rx_buffer, 512, 0);
+      if (bytes_received <= 0) continue;
+      /*==============================*/
+      
+      /* Bytes where received, handle them depending on rx_state */
+      for (int idx=0; idx<bytes_received; idx++) {
+        switch (rx_state) {
+          case WAITING_RES:
+            ESP_LOGD(TAG, "Received response byte 0x%02X", rx_buffer[idx]);
+            /// TODO: Handle cases where response byte includes NACK or JUST_RESET
+            switch (command) {
+              /* Commands without body sequences */
+              case CONF:
+                rx_state = WAITING_CRC;           // Next byte is the CRC
+                break;
+              /* Commands with body sequences */
+              default:
+                rx_state = WAITING_LEN;
+                body_len = 0;
+                break;
+            } // end switch
+            break;
+          
+          case WAITING_LEN :
+            /// TODO: Allow receiving more than one length byte
+            body_len = rx_buffer[idx];
+            crc ^= body_len;
+            ESP_LOGV(TAG, "Body length: %lu bytes", body_len);
+            rx_state = WAITING_BODY;        // Next bytes received will be the command body
+            break;
+          
+          case WAITING_BODY:
+            /// TODO: handle this differently for NEXT_PHOTO command
+            switch(command) {
+              case STATUS:
+                while (rx_count < body_len && idx < bytes_received) {
+                  response_buff[rx_count] = rx_buffer[idx];   // Add byte to buffer
+                  crc ^= rx_buffer[idx];
+                  idx++;                                    // Move to next byte
+                  rx_count++;                               // Up the byte count
+                }
+                --idx;                                      // Move back a place so CRC is correctly recieved
+                for (int p=0; p < body_len / 8; p++) {
+                  uint32_t photo_size = 0;
+                  uint32_t photo_timestamp = 0;
+                  for (int t=0; t<4; t++) {
+                    photo_size |= response_buff[2+8*p] << 8*(3-t);
+                    photo_timestamp |= response_buff[2+4+8*p] << 8*(3-t);
+                  }
+                  ESP_LOGI(TAG, "Photo %d:\tSize=%lu B\tTimestamp=%lu", p+1, photo_size);
+                }
+                break;
+
+              case NEXT_PHOTO:
+                break;
+
+            } // end switch
+            ESP_LOGV(TAG, "Body bytes received: %lu", rx_count);
+            if (rx_count < body_len) break;             // Not enough bytes received yet
+            master->response_len = rx_count;            // Inform the master about the amount of received bytes
+            rx_state = WAITING_CRC;                     // Next byte is CRC
+            break;
+          
+          case WAITING_CRC:
+            ESP_LOGV(TAG, "Local CRC = 0x%02X\tReceived CRC = 0x%02X", crc, rx_buffer[idx]);
+            if (crc != rx_buffer[idx]){
+              ESP_LOGE(TAG, "Bad CRC!");
+            }
+            break;
+          
+          case RESET_RX:
+            idx = bytes_received;  // break the for loop (this should never execute)
+            break;
+        } // end switch(rx_state)
+      } // end for
+
+    } // end while
+     done:
+      /// TODO: What if there's still bytes in the buffer? This must be a function, not a goto tag
+      rx_count = 0;               // reset byte count
+      rx_state = WAITING_RES;     // Back to the beginning
+      // Stop the UART timeout timer
+      ESP_GOTO_ON_FALSE(  xTimerStop(master->response_timer, 0), 
+                          ESP_FAIL, err, TAG, 
+                          "Couldn't stop the UART response timer!"  );
+      /* Tell the talking task we're done */
+      ESP_LOGD(TAG, "Notifying talking task (0x%02X)", command);
+      xTaskNotify(master->talk_task,command, eSetValueWithoutOverwrite );
+      // Send response to the Host
+  } // end while(true)
+ err:
+  ESP_LOGE(TAG, "Fatal failure, restarting in 5 seconds...");
+  vTaskDelay(pdMS_TO_TICKS(5000));
+  esp_restart();
+} // end handle_response
 
 /* ============= TX Helper functions ============= */
 void BoardMaster::build_conf() {
